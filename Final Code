@@ -1,0 +1,253 @@
+// Dweet for server purpose and gps as our thing for sending data 
+
+// Libraries
+#include <Adafruit_SleepyDog.h>
+#include "Adafruit_FONA.h"
+#include <SoftwareSerial.h>
+
+// LED pin 
+const int ledPin=6;
+
+// Latitude & longitude 
+float latitude, longitude, speed_kph, heading, altitude;
+
+
+// Pins
+#define FONA_RX 2
+#define FONA_TX 3
+#define FONA_RST 4
+
+// Buffer
+char replybuffer[255];
+
+// Instances
+SoftwareSerial fonaSS = SoftwareSerial(FONA_TX, FONA_RX);
+SoftwareSerial *fonaSerial = &fonaSS;
+
+// Fona instance
+Adafruit_FONA fona = Adafruit_FONA(FONA_RST);
+uint8_t type;
+
+// Thing name
+String yourThing = "amirGps";
+
+void setup() {
+
+  // Initi serial
+  while (!Serial);
+  Serial.begin(115200);
+  Serial.println(F("FONA reading SMS"));
+  Serial.println(F("Initializing....(May take 3 seconds)"));
+
+  fonaSerial->begin(4800);
+  if (! fona.begin(*fonaSerial)) {
+    Serial.println(F("Couldn't find FONA"));
+    while (1);
+  }
+  
+  type = fona.type();
+  Serial.println(F("FONA is OK"));
+  Serial.print(F("Found "));
+  switch (type) {
+    case FONA800L:
+      Serial.println(F("FONA 800L")); break;
+    case FONA800H:
+      Serial.println(F("FONA 800H")); break;
+    case FONA808_V1:
+      Serial.println(F("FONA 808 (v1)")); break;
+    case FONA808_V2:
+      Serial.println(F("FONA 808 (v2)")); break;
+    case FONA3G_A:
+      Serial.println(F("FONA 3G (American)")); break;
+    case FONA3G_E:
+      Serial.println(F("FONA 3G (European)")); break;
+    default: 
+      Serial.println(F("???")); break;
+  }
+  
+  // Print module IMEI number.
+  char imei[15] = {0}; // MUST use a 16 character buffer for IMEI!
+  uint8_t imeiLen = fona.getIMEI(imei);
+  if (imeiLen > 0) {
+    Serial.print("Module IMEI: "); Serial.println(imei);
+  }
+
+  // Setup GPRS settings
+  //fona.setGPRSNetworkSettings(F("internet"));
+  fona.setGPRSNetworkSettings(F("wholesale"), F(""), F(""));
+
+  // Use the watchdog to simplify retry logic and make things more robust.
+  // Enable this after FONA is intialized because FONA init takes about 8-9 seconds.
+//  Watchdog.enable(8000);
+//  Watchdog.reset();
+  delay (10000);
+
+  //Enable GPS
+  fona.enableGPS(true);
+
+uint8_t n=0;
+
+  while (n != 1)
+  {
+         n =fona.getNetworkStatus();
+        Serial.print(F("Network status "));
+        Serial.print(n);
+        Serial.print(F(": "));
+        if (n == 0) Serial.println(F("Not registered"));
+        if (n == 1) Serial.println(F("Registered (home)"));
+        if (n == 2) Serial.println(F("Not registered (searching)"));
+        if (n == 3) Serial.println(F("Denied"));
+        if (n == 4) Serial.println(F("Unknown"));
+        if (n == 5) Serial.println(F("Registered roaming"));
+        Serial.print("\n");
+        delay(1000);
+  }
+
+  // Wait
+  delay(10000);
+
+  // Turn GPRS off & on again
+  if (!fona.enableGPRS(false))
+    Serial.println(F("Failed to turn off"));
+
+  delay(10000);
+ 
+  if (!fona.enableGPRS(true))
+    Serial.println(F("Failed to turn on"));
+
+  delay(10000);
+
+}
+void loop() {
+
+  // Watchdog reset at start of loop--make sure everything below takes less than 8 seconds in normal operation!
+  //Watchdog.reset();
+
+  // Grab a GPS reading.
+  float latitude, longitude, speed_kph, heading, altitude;
+  bool gpsFix = fona.getGPS(&latitude, &longitude, &speed_kph, &heading, &altitude);
+
+
+  Serial.print("Latitude: ");
+  printFloat(latitude, 7);
+  Serial.println("");
+
+  Serial.print("Longitude: ");
+  printFloat(longitude, 7);
+  Serial.println("");
+  
+
+  // Prepare request
+  uint16_t statuscode;
+  int16_t length;
+  String url = "http://dweet.io/dweet/for/";
+  url += yourThing;
+  url += "?latitude=";
+  url += String(latitude,9);
+  url += "&longitude=";
+  url += String(longitude,9);
+  char buf[80];
+  url.toCharArray(buf, url.length());
+
+  Serial.print("Request: ");
+  Serial.println(buf);
+  
+  // Send location to Dweet.io
+  if (!fona.HTTP_GET_start(buf, &statuscode, (uint16_t *)&length)) {
+    Serial.println("Failed!");
+  }
+  while (length > 0) {
+    while (fona.available()) {
+      char c = fona.read();
+           
+      // Serial.write is too slow, we'll write directly to Serial register!
+      #if defined(__AVR_ATmega328P__) || defined(__AVR_ATmega168__)
+        loop_until_bit_is_set(UCSR0A, UDRE0); /* Wait until data register empty. */
+        UDR0 = c;
+      #else
+        Serial.write(c);
+      #endif
+      length--;
+    }
+  }
+  fona.HTTP_GET_end();
+
+  // Wait
+  delay(10000);
+  
+}
+
+
+
+
+
+void printFloat(float value, int places) {
+  // this is used to cast digits 
+  int digit;
+  float tens = 0.1;
+  int tenscount = 0;
+  int i;
+  float tempfloat = value;
+
+    // make sure we round properly. this could use pow from <math.h>, but doesn't seem worth the import
+  // if this rounding step isn't here, the value  54.321 prints as 54.3209
+
+  // calculate rounding term d:   0.5/pow(10,places)  
+  float d = 0.5;
+  if (value < 0)
+    d *= -1.0;
+  // divide by ten for each decimal place
+  for (i = 0; i < places; i++)
+    d/= 10.0;    
+  // this small addition, combined with truncation will round our values properly 
+  tempfloat +=  d;
+
+  // first get value tens to be the large power of ten less than value
+  // tenscount isn't necessary but it would be useful if you wanted to know after this how many chars the number will take
+
+  if (value < 0)
+    tempfloat *= -1.0;
+  while ((tens * 10.0) <= tempfloat) {
+    tens *= 10.0;
+    tenscount += 1;
+  }
+
+
+  // write out the negative if needed
+  if (value < 0)
+    Serial.print('-');
+
+  if (tenscount == 0)
+    Serial.print(0, DEC);
+
+  for (i=0; i< tenscount; i++) {
+    digit = (int) (tempfloat/tens);
+    Serial.print(digit, DEC);
+    tempfloat = tempfloat - ((float)digit * tens);
+    tens /= 10.0;
+  }
+
+  // if no places after decimal, stop now and return
+  if (places <= 0)
+    return;
+
+  // otherwise, write the point and continue on
+  Serial.print('.');  
+
+  // now write out each decimal place by shifting digits one by one into the ones place and writing the truncated value
+  for (i = 0; i < places; i++) {
+    tempfloat *= 10.0; 
+    digit = (int) tempfloat;
+    Serial.print(digit,DEC);  
+    // once written, subtract off that digit
+    tempfloat = tempfloat - (float) digit; 
+  }
+}
+
+
+
+
+
+
+
+
